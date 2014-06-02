@@ -32,7 +32,7 @@ def sendRequest(url, token=None, payload=None):
     json_data = json.loads(request.read())
 
     request.close()
-    return json.dumps(json_data)
+    return json_data
 
 def getToken(url, user, tenant, password):
 
@@ -61,24 +61,21 @@ def getPorts(url, token):
     url = url + '/v2.0/ports'
     return sendRequest(url, token)
 
-def getNetworks(url, token):
+def getNetworks(url, token, interface):
 
-    """
-    Returns networks
-    """
-    url = url + '/v2.0/networks'
-    return sendRequest(url, token)
-    
-
-def getNetworkNames(networks, interface):
     """
     Returns network name list
     """
+    def _get_networks(url, token):
+        url = url + '/v2.0/networks'
+        return sendRequest(url, token)
+ 
     def _return_net_type(network):
         if network['name'].split('.')[-1] =='private':
             return 'eth1'
         return 'eth0'
 
+    networks = _get_networks(url, token)
     networkNames = []
     for network in networks['networks']:
         net_type = _return_net_type(network)
@@ -95,6 +92,22 @@ def getServers(url, token, hostname):
     if hostname != None:
         url = url + ('&host=%s') % hostname
     return sendRequest(url, token)
+
+def getActiveServers(url, token, hostname):
+
+    """
+    Returns active instances for the given tenant.
+    """
+    url = url + '/servers/detail?all_tenants=1&status=ACTIVE'
+    if hostname != None:
+        url = url + ('&host=%s') % hostname
+    result = sendRequest(url, token)
+    
+    activeServers = []
+    for server in result['servers']:
+        if server['OS-EXT-STS:power_state'] == 1:
+           activeServers.append(server)
+    return {'servers': activeServers}
 
 def getHypervisors(url, token):
 
@@ -125,23 +138,25 @@ def checkPortStatus(ip):
     else:
         return "DOWN"
 
-def getPortStatus(ports, downPorts):
+def getPortStatus(ports):
 
     """
     Returns status of all ports.
     """
+    downPorts = []
     for port in ports['ports']:
         for ip in port['fixed_ips']:
             status = checkPortStatus(ip['ip_address'])
             if status == "DOWN":
                 downPorts.append({'id': port['id'], 'ip': ip['ip_address']})
+    return downPorts
 
-def getServerPortStatus(servers, networks, interface, downServers):
+def getPortDownServers(servers, networks):
 
     """
     Returns server port active status with ping test.
     """
-    networks = getNetworkNames(networks, interface)
+    downServers = []
     for server in servers['servers']:
         for network in networks:
             try:
@@ -152,6 +167,7 @@ def getServerPortStatus(servers, networks, interface, downServers):
             except KeyError:
                 # Pass if the network is not allocated for the VM
                 continue
+    return downServers
 
 # Build our required arguments list
 parser = argparse.ArgumentParser()
@@ -161,7 +177,7 @@ parser.add_argument("-i", "--interface", help="Full hostname of cnode to check."
 args = parser.parse_args()
 
 # Get admin token
-adminToken = json.loads(getToken(env.AUTH_URL, env.USERNAME, env.TENANT, env.PASSWORD))
+adminToken = getToken(env.AUTH_URL, env.USERNAME, env.TENANT, env.PASSWORD)
 adminTokenID = adminToken['access']['token']['id']
 adminTokenTenantID = adminToken['access']['token']['tenant']['id']
 
@@ -173,7 +189,7 @@ for item in adminToken['access']['serviceCatalog']:
         adminNovaURL = item['endpoints'][0]['adminURL']
 
 # Validate arugments were given
-hypervisors = json.loads(getHypervisors(adminNovaURL, adminTokenID))
+hypervisors = getHypervisors(adminNovaURL, adminTokenID)
 if args.cnode != None and (type(args.cnode) != type(str()) or
    isValidHypervisor(hypervisors, args.cnode) == False):
     sys.stderr.write('Invalid conde: %s\n\n' % args.cnode)
@@ -187,15 +203,13 @@ if args.interface != None and (args.interface != 'eth0' and
     
 
 # Get servers for given tenant
-servers = json.loads(getServers(adminNovaURL, adminTokenID, args.cnode))
-networks = json.loads(getNetworks(adminQuantumURL, adminTokenID))
-#ports = json.loads(getPorts(adminQuantumURL, adminTokenID))
+servers = getActiveServers(adminNovaURL, adminTokenID, args.cnode)
+networks = getNetworks(adminQuantumURL, adminTokenID, args.interface)
+portDownServers = getPortDownServers(servers, networks)
 
-portDownServers = []
-getServerPortStatus(servers, networks, args.interface, portDownServers)
+#ports = getPorts(adminQuantumURL, adminTokenID)
+#downPorts = getPortStatus(ports)
 
-#downPorts = []
-#getPortStatus(ports, downPorts)
 print ""
 print "==================== PORT DOWN SERVERS: ", args.cnode, "======================="
 f = open('/var/lib/port_status.log', 'a')
@@ -205,6 +219,3 @@ for server in portDownServers:
     f.write(data)
 f.close()
 print ""
-#print "==================== DOWN PORTS:", args.cnode, "======================="
-#for port in downPorts:
-#    print "Port ID:", port['id'], "IP address:", port['ip']
